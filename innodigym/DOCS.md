@@ -85,3 +85,7 @@ who is logged in through the `X-Remote-User-*` headers, which the add-on trusts.
 
 Packaging, database, sync worker and the `local/*` API are in place. The progress screens and the Home Assistant
 sensors arrive in later versions.
+
+---
+
+Free, independent and unofficial. If it saves you time, [☕ buy me a coffee](https://buymeacoffee.com/dalocar) helps keep it running.
