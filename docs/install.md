@@ -16,8 +16,13 @@ does not match what you see, the troubleshooting list at the end is the place to
 
 ## 1. Add the repository
 
-Settings, Add-ons, Add-on store, the three-dots menu, **Repositories**, paste
+Use the **app store**, not the Marketplace. Recent Home Assistant versions call add-ons "apps": Settings, **Apps**
+(older versions: **Add-ons**), **Install app** (older: **Add-on store**), the three-dots menu, **Repositories**, paste
 `https://github.com/dalocar/innodigym-ha`, Add. Reload the store page; "InnoGym add-ons" appears with **InnoGym**.
+
+The Marketplace's "Add from a GitHub link" will refuse this repository with "holds apps, the Marketplace does not
+install apps". That message is not an error in the repository; it only means you are in the wrong dialog (and shows
+Home Assistant recognised the repository as an app repository).
 
 ## 2. Install and start
 
@@ -82,6 +87,6 @@ To see what was published, subscribe to `innodigym/#` and `homeassistant/+/innod
 
 ## Updating and removing
 
-Raise `version` in `innodigym/config.yaml`, push, reload the add-on store, then Update in the add-on page (it rebuilds on the device). The
+Raise `version` in `innodigym/config.yaml`, push, reload the app store, then Update in the add-on page (it rebuilds on the device). The
 database in `/data` is kept across updates and included in Home Assistant backups. Uninstalling the add-on deletes
 it; the retained discovery messages stay on the broker until you remove the device in the MQTT integration.
