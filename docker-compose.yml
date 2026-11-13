@@ -1,0 +1,10 @@
+# Try the add-on without Home Assistant: docker compose up --build, then open http://localhost:8787
+# Everything belongs to one user, "Local". MQTT is off unless you set INNODIGYM_MQTT_HOST (and _PORT, _USER, _PASSWORD).
+services:
+  innodigym:
+    build: ./innodigym
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
