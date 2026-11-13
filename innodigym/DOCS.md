@@ -83,8 +83,8 @@ who is logged in through the `X-Remote-User-*` headers, which the add-on trusts.
 
 ## Status
 
-Packaging, database, sync worker and the `local/*` API are in place. The progress screens and the Home Assistant
-sensors arrive in later versions.
+Early version (0.1.0). The database, sync, panel screens and Home Assistant sensors are working; report anything
+that does not match this page.
 
 ---
 
