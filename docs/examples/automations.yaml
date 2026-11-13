@@ -1,0 +1,61 @@
+# Paste into Settings > Automations > Create > Create new > three-dots > Edit in YAML (one at a time),
+# or merge into automations.yaml. Replace "alex" as in dashboard-card.yaml, and notify.notify with
+# your phone, for example notify.mobile_app_pixel_8.
+
+- alias: "Gym reminder"
+  description: "Evening nudge on a training day when nothing has been logged yet."
+  triggers:
+    - trigger: time
+      at: "19:30:00"
+  conditions:
+    - condition: time
+      weekday: [mon, wed, fri]
+    - condition: state
+      entity_id: binary_sensor.innodigym_alex_trained_today
+      state: "off"
+    - condition: template
+      value_template: >
+        {{ states('sensor.innodigym_alex_workouts_this_week') | int(0)
+           < states('sensor.innodigym_alex_weekly_goal') | int(3) }}
+  actions:
+    - action: notify.notify
+      data:
+        title: "Gym time"
+        message: >
+          {{ states('sensor.innodigym_alex_workouts_this_week') }} of
+          {{ states('sensor.innodigym_alex_weekly_goal') }} workouts this week.
+
+- alias: "Workout finished: celebrate a personal record"
+  description: "Fires when a new workout arrives from the machine and it set at least one PR."
+  triggers:
+    - trigger: state
+      entity_id: event.innodigym_alex_workout_finished
+  conditions:
+    - condition: template
+      value_template: "{{ trigger.to_state.attributes.new_prs | default([]) | length > 0 }}"
+  actions:
+    - action: notify.notify
+      data:
+        title: "New personal record"
+        message: >
+          {% set prs = trigger.to_state.attributes.new_prs %}
+          {{ prs | map(attribute='exercise') | join(', ') }}
+          ({{ trigger.to_state.attributes.name }}, {{ trigger.to_state.attributes.volume_kg }} kg lifted)
+
+- alias: "Sunday training summary"
+  triggers:
+    - trigger: time
+      at: "20:00:00"
+  conditions:
+    - condition: time
+      weekday: [sun]
+  actions:
+    - action: notify.notify
+      data:
+        title: "Training this week"
+        message: >
+          {{ states('sensor.innodigym_alex_workouts_this_week') }} of
+          {{ states('sensor.innodigym_alex_weekly_goal') }} workouts,
+          {{ states('sensor.innodigym_alex_volume_this_week') }} kg,
+          {{ states('sensor.innodigym_alex_energy_this_week') }} kcal.
+          Goal streak: {{ states('sensor.innodigym_alex_goal_streak') }} weeks.

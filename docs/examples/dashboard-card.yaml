@@ -1,0 +1,50 @@
+# Dashboard card for one person. Replace "alex" with the lowercase name of your Home Assistant user
+# (the entity ids come from the device name "INNODIGYM <name>"; check Settings > Devices > MQTT).
+# Dashboard > Edit > Add card > Manual, paste everything below.
+type: vertical-stack
+cards:
+  - type: heading
+    heading: Training
+    icon: mdi:dumbbell
+  - type: grid
+    columns: 2
+    square: false
+    cards:
+      - type: tile
+        entity: sensor.innodigym_alex_workouts_this_week
+        name: This week
+        vertical: true
+      - type: tile
+        entity: binary_sensor.innodigym_alex_trained_today
+        name: Trained today
+        vertical: true
+      - type: tile
+        entity: sensor.innodigym_alex_volume_this_week
+        name: Volume this week
+        vertical: true
+      - type: tile
+        entity: sensor.innodigym_alex_goal_streak
+        name: Goal streak
+        vertical: true
+  - type: gauge
+    entity: sensor.innodigym_alex_workouts_this_week
+    name: Workouts this week
+    min: 0
+    max: 7
+    needle: false
+  - type: markdown
+    content: >
+      **Last workout:** {{ states('sensor.innodigym_alex_last_workout') }}
+      on {{ states('sensor.innodigym_alex_last_workout_date') }}
+      ({{ states('sensor.innodigym_alex_last_workout_volume') }} kg,
+      {{ states('sensor.innodigym_alex_last_workout_energy') }} kcal)
+  # Weekly volume: the sensor resets every Monday, so the highest value of each week is that week's total.
+  - type: statistics-graph
+    title: Weekly volume (kg)
+    entities:
+      - sensor.innodigym_alex_volume_this_week
+    stat_types:
+      - max
+    period: week
+    days_to_show: 84
+    chart_type: bar

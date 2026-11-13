@@ -8,7 +8,7 @@ progress for each person, and publishes sensors and a "workout finished" event t
 > reverse-engineered API that can change without notice.
 
 - Install: [docs/install.md](docs/install.md)
-- Options and entities: [innodigym/DOCS.md](innodigym/DOCS.md)
+- Options and entities: [innodigym/DOCS.md](innodigym/DOCS.md); a dashboard card and automations to paste: [docs/examples/](docs/examples/)
 - Design and API: [docs/design.md](docs/design.md)
 
 ## Layout
