@@ -1,6 +1,7 @@
 """
 Sync worker: copies each user's workouts from the vendor cloud into the local
 database. Read-only towards the vendor (GET requests only, plus the login call).
+Afterwards, users with a Hevy API key get new workouts pushed to Hevy (see hevy.py).
 
 Per user, one run:
   1. sport/record/list from (newest stored workout - LOOKBACK_DAYS) to tomorrow,
@@ -24,6 +25,7 @@ import urllib.request
 from datetime import datetime, timedelta
 
 import db
+import hevy
 
 BASE = "https://power.renhesports.com"
 LOOKBACK_DAYS = 7
@@ -102,7 +104,7 @@ def fetch_records(client, start, end):
     return out
 
 
-def sync_user(conn, user, client, now=None):
+def sync_user(conn, user, client, now=None, log=True):
     """One sync run for one user. Returns {'fetched', 'inserted', 'details', 'error'}.
     Never raises for vendor problems; they are logged and returned."""
     now = now or datetime.now()
@@ -142,7 +144,8 @@ def sync_user(conn, user, client, now=None):
         result["error"] = ("auth: " if e.auth else "") + str(e)
     except Exception as e:  # noqa: BLE001 - one user's bad data must not stop the others
         result["error"] = "unexpected: %s: %s" % (type(e).__name__, e)
-    db.log_sync(conn, uid, result["fetched"], result["inserted"], result["error"])
+    if log:
+        db.log_sync(conn, uid, result["fetched"], result["inserted"], result["error"])
     return result
 
 
@@ -153,15 +156,48 @@ def _merge(detail, records, rid):
     return {**detail, **{k: v for k, v in (base or {}).items() if v is not None}}
 
 
-def sync_all(conn, make_client, on_user=None):
-    """Run every user that has a token. make_client(token) returns a client.
-    on_user(conn, user, result, first_run) is called after each user; its errors never stop the loop."""
+def _login(conn, user, make_client):
+    """Log in with the password from the add-on options and store the new token. Returns the token or raises VendorError."""
+    token = make_client(None).login(user["vendor_email"], user["vendor_password"])
+    db.set_token(conn, user["id"], token)
+    return token
+
+
+def _sync_one(conn, u, make_client):
+    """One user's vendor sync. With credentials in the options, a missing or rejected token is replaced by a fresh login."""
+    can_login = bool(u["vendor_email"] and u["vendor_password"])
+    token = u["token"]
+    if not token and can_login:
+        try:
+            token = _login(conn, u, make_client)
+        except VendorError as e:
+            err = ("auth: " if e.auth else "") + "login: " + str(e)
+            db.log_sync(conn, u["id"], 0, 0, err)
+            return {"fetched": 0, "inserted": 0, "details": 0, "error": err, "new_ids": []}
+    r = sync_user(conn, u, make_client(token), log=not can_login)
+    if can_login and r["error"] and r["error"].startswith("auth:"):
+        try:
+            r = sync_user(conn, u, make_client(_login(conn, u, make_client)))
+        except VendorError as e:
+            r = {**r, "error": ("auth: " if e.auth else "") + "login: " + str(e)}
+            db.log_sync(conn, u["id"], 0, 0, r["error"])
+    elif can_login:
+        db.log_sync(conn, u["id"], r["fetched"], r["inserted"], r["error"])
+    return r
+
+
+def sync_all(conn, make_client, on_user=None, make_hevy=hevy.HevyClient):
+    """Run every user that has a token or login. make_client(token) returns a vendor client,
+    make_hevy(api_key) a Hevy client. on_user(conn, user, result, first_run) is called after each user;
+    its errors never stop the loop."""
     out = {}
     for u in db.list_users(conn):
-        if not u["token"]:
+        if not u["token"] and not (u["vendor_email"] and u["vendor_password"]):
             continue
         first_run = db.last_sync(conn, u["id"]) is None
-        out[u["name"]] = r = sync_user(conn, u, make_client(u["token"]))
+        out[u["name"]] = r = _sync_one(conn, u, make_client)
+        if u["hevy_api_key"] and make_hevy:
+            r["hevy"] = hevy.push_user(conn, db.get_user(conn, u["id"]), make_hevy(u["hevy_api_key"]))
         if on_user:
             try:
                 on_user(conn, u, r, first_run)
@@ -194,7 +230,9 @@ class SyncWorker(threading.Thread):
                 for name, r in sync_all(conn, self.make_client, self.on_user).items():
                     print("sync %s: %d seen, %d new, %d with sets%s" % (
                         name, r["fetched"], r["inserted"], r["details"],
-                        ", error: " + r["error"] if r["error"] else ""), flush=True)
+                        ", error: " + r["error"] if r["error"] else "") +
+                        (" | hevy: %d pushed%s" % (r["hevy"]["pushed"], ", error: " + r["hevy"]["error"] if r["hevy"]["error"] else "")
+                         if r.get("hevy") else ""), flush=True)
             except Exception as e:  # noqa: BLE001 - keep the worker alive
                 print("sync worker error: %s" % e, flush=True)
             self._wake.wait(self.interval)

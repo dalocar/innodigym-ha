@@ -17,6 +17,8 @@ Interactive prototype of the screens: see the design discussion; decisions below
 3b. **Screens** (done): Training tab (Overview, Workouts, Progress, Sync) in `innodigym/app/static/training.js` + `training-core.js` + `training.css`; shown only when `local/me` answers, login screen skipped; eight languages. Original text: relative URLs for ingress (it serves under a path prefix), History/Progress/notes/manual logging from `/local/*`, per-user from the `X-Remote-User-Id` ingress header.
 4. **Home Assistant** (done): `app/stats.py` (mirrors `training-core.js`), `app/mqtt.py` (stdlib MQTT 3.1.1 client, discovery, state, event), hooks in `sync.py` and `server.py`. Broker settings from the Supervisor (`SUPERVISOR_TOKEN`) or `INNODIGYM_MQTT_HOST/PORT/USER/PASSWORD`. Verified against a real Mosquitto 2.1; not yet against a real Home Assistant. Original text: MQTT discovery, `innodigym_workout_finished` event with `user`, volume, kcal, new PRs.
 
+5. **Options users and Hevy** (done): `app/accounts.py` turns the `users:` option into database users (credentials, `ha_user` link to the panel visitor); `sync.py` re-logs in with the stored password when the token is missing or rejected; `app/hevy.py` pushes workouts to Hevy after each sync (`workouts.hevy_id` makes it idempotent, `users.hevy_since` bounds it, `hevy_exercises` maps names to templates). Push only; not yet tried against the real Hevy API.
+
 ## Data notes (checked against real records)
 - Weights arrive in tenths of kg; stored in kg.
 - The vendor's workout volume (`coreData`) is **higher** than the sum of set weight x reps, because the machine reports

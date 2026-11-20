@@ -16,7 +16,7 @@ import json
 import sqlite3
 import time
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _MIGRATIONS = {
     1: """
@@ -80,6 +80,24 @@ _MIGRATIONS = {
         error    TEXT
     );
     """,
+    2: """
+    ALTER TABLE users ADD COLUMN ha_username TEXT;       -- HA login name, to link an options user to the panel visitor
+    ALTER TABLE users ADD COLUMN vendor_password TEXT;   -- only when set in the add-on options; lets the worker re-login
+    ALTER TABLE users ADD COLUMN hevy_api_key TEXT;
+    ALTER TABLE users ADD COLUMN hevy_since TEXT;        -- only workouts from this date on are pushed to Hevy
+    ALTER TABLE users ADD COLUMN hevy_last_run TEXT;
+    ALTER TABLE users ADD COLUMN hevy_last_error TEXT;
+    ALTER TABLE users ADD COLUMN managed INTEGER NOT NULL DEFAULT 0;  -- 1 when defined in the add-on options
+    ALTER TABLE workouts ADD COLUMN hevy_id TEXT;
+    ALTER TABLE workouts ADD COLUMN hevy_attempts INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE workouts ADD COLUMN hevy_error TEXT;
+    CREATE TABLE hevy_exercises (
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        exercise    TEXT NOT NULL,           -- InnoGym exercise name
+        template_id TEXT NOT NULL,           -- Hevy exercise template id
+        PRIMARY KEY (user_id, exercise)
+    );
+    """,
 }
 
 
@@ -129,9 +147,24 @@ def get_user(conn, user_id):
     return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
 
 
-def get_or_create_ha_user(conn, ha_user_id, name):
-    """The person behind a Home Assistant login; created on first visit."""
-    return get_user_by_ha_id(conn, ha_user_id) or get_user(conn, create_user(conn, name or "User", ha_user_id=ha_user_id))
+def get_or_create_ha_user(conn, ha_user_id, name, username=None):
+    """The person behind a Home Assistant login. Created on first visit, unless an add-on options user
+    names this HA username, in which case that user is linked to the login."""
+    u = get_user_by_ha_id(conn, ha_user_id)
+    if u:
+        return u
+    if username:
+        u = conn.execute("SELECT * FROM users WHERE lower(ha_username) = lower(?) AND ha_user_id IS NULL",
+                         (username,)).fetchone()
+        if u:
+            with conn:
+                conn.execute("UPDATE users SET ha_user_id = ? WHERE id = ?", (ha_user_id, u["id"]))
+            return get_user(conn, u["id"])
+    uid = create_user(conn, name or "User", ha_user_id=ha_user_id)
+    if username:
+        with conn:
+            conn.execute("UPDATE users SET ha_username = ? WHERE id = ?", (username, uid))
+    return get_user(conn, uid)
 
 
 def set_goal(conn, user_id, goal_per_week):

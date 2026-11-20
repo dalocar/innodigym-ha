@@ -13,6 +13,7 @@ from datetime import datetime
 
 import backup
 import db
+import hevy
 import sync
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -64,7 +65,11 @@ def _me(conn, user):
     last = db.last_sync(conn, user["id"])
     return {"id": user["id"], "name": user["name"], "goalPerWeek": user["goal_per_week"],
             "language": user["language"], "vendorLinked": bool(user["token"]),
-            "vendorEmail": user["vendor_email"], "lastSync": last}
+            "vendorEmail": user["vendor_email"], "lastSync": last,
+            "managed": bool(user["managed"]),
+            "hevy": {"linked": bool(user["hevy_api_key"]), "since": user["hevy_since"],
+                     "lastRun": user["hevy_last_run"], "lastError": user["hevy_last_error"],
+                     **hevy.counts(conn, user)}}
 
 
 def _workout_id(parts, i):

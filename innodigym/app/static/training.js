@@ -220,6 +220,7 @@
       ${last && last.error ? `<p class="server-error">${e(last.error)}</p>` : ""}
       <div class="inline-form"><button type="button" id="tr-sync-now"${linked && !S.busy ? "" : " disabled"}>${e(S.busy ? t("Syncing…") : t("Sync now"))}</button></div>
       <p class="meta">${e(t("Workouts are copied into this add-on's database and stay here even if the vendor app changes."))}</p></section>
+      ${hevyCardHtml()}
       <section class="tr-card"><h3>${e(linked ? t("Change account") : t("Link your INNODIGYM account"))}</h3>
       <form id="tr-link-form" class="inline-form stacked"><label>${e(t("Email"))}<input type="email" id="tr-link-email" required autocomplete="username"></label>
       <label>${e(t("Password"))}<input type="password" id="tr-link-pass" required autocomplete="current-password"></label>
@@ -228,6 +229,24 @@
       <form id="tr-token-form" class="inline-form stacked"><label>${e(t("Token"))}<input type="password" id="tr-token" required autocomplete="off"></label><button type="submit" class="secondary">${e(t("Save token"))}</button></form></details></section>
       <section class="tr-card"><h3>${e(t("Import a backup"))}</h3><p class="meta">${e(t("Choose the JSON files you saved earlier: the workout list and any workout details."))}</p>
       <label class="tr-file">${e(t("Choose files"))}<input type="file" id="tr-import-file" accept=".json,application/json" multiple></label></section></div>`;
+  }
+
+  function hevyCardHtml() {
+    const h = S.me.hevy || {};
+    if (!h.linked) {
+      return `<section class="tr-card"><h3>${e(t("Hevy"))}</h3>
+      <dl class="tr-kv"><dt>${e(t("Status"))}</dt><dd>${e(t("Not set up"))}</dd></dl>
+      <p class="meta">${e(t("Add your Hevy API key to this user in the add-on options (Configuration tab) to send new workouts to Hevy after each sync."))}</p></section>`;
+    }
+    const state = h.lastError ? t("Last run had a problem") : !h.lastRun ? t("Waiting for the first sync") : t("Up to date");
+    return `<section class="tr-card"><h3>${e(t("Hevy"))}</h3>
+      <dl class="tr-kv"><dt>${e(t("Status"))}</dt><dd>${e(state)}</dd>
+      <dt>${e(t("Last run"))}</dt><dd>${h.lastRun ? e(h.lastRun) : "–"}</dd>
+      <dt>${e(t("Sent to Hevy"))}</dt><dd>${e(I18N.plural(h.sent || 0, "workout"))}</dd>
+      <dt>${e(t("Waiting to be sent"))}</dt><dd>${e(I18N.plural(h.waiting || 0, "workout"))}</dd>
+      <dt>${e(t("Sending from"))}</dt><dd>${e(h.since || "–")}</dd></dl>
+      ${h.lastError ? `<p class="server-error">${e(h.lastError)}</p>` : ""}
+      <p class="meta">${e(t("Each workout is sent to Hevy once, right after the sync that fetched it. \"Sync now\" also sends what is waiting."))}</p></section>`;
   }
 
   function render() {

@@ -17,7 +17,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+import accounts
 import db
+import hevy
 import local_api
 import mqtt
 import sync
@@ -31,7 +33,7 @@ DATA_DIR = os.environ.get("INNODIGYM_DATA_DIR")
 DB = None          # sqlite3 connection, opened in main()
 WORKER = None      # background sync thread, started in main()
 PUBLISHER = mqtt.Publisher(None)  # replaced in main() when a broker is available
-OPTIONS = {"sync_interval_minutes": 10, "discovery_prefix": "homeassistant"}
+OPTIONS = {"sync_interval_minutes": 10, "discovery_prefix": "homeassistant", "users": []}
 
 
 def load_options(data_dir):
@@ -105,7 +107,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         app standalone) everyone is the single user 'Local'."""
         hid = self.headers.get("X-Remote-User-Id")
         name = self.headers.get("X-Remote-User-Display-Name") or self.headers.get("X-Remote-User-Name")
-        return db.get_or_create_ha_user(conn(), hid or "local", name or "Local")
+        return db.get_or_create_ha_user(conn(), hid or "local", name or "Local",
+                                        self.headers.get("X-Remote-User-Name"))
 
     def local(self, method):
         if not DATA_DIR:
@@ -211,6 +214,7 @@ def main():
         os.makedirs(DATA_DIR, exist_ok=True)
         OPTIONS = load_options(DATA_DIR)
         DB = db.connect(os.path.join(DATA_DIR, "innodigym.db"))
+        accounts.apply_options(DB, OPTIONS.get("users") or [])
         print(f"Database ready in {DATA_DIR} ({len(db.list_users(DB))} users)")
         PUBLISHER = mqtt.Publisher(mqtt.broker_from_environment(), OPTIONS["discovery_prefix"])
         print("MQTT: %s" % ("publishing to Home Assistant" if PUBLISHER.enabled else "off (no broker settings)"), flush=True)

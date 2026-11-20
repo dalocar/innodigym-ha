@@ -16,6 +16,29 @@ progress stay yours even if the vendor app changes or your account is closed.
 
 People and their INNODIGYM accounts are added inside the InnoGym panel, not in these options.
 
+### Users
+
+Each person is one entry in `users`. With credentials here you do not need to log in inside the panel, and
+the add-on logs in again by itself whenever the INNODIGYM token expires.
+
+| Field | Description |
+|---|---|
+| `name` | Required. Shown in the panel and used for the sensors. |
+| `ha_user` | Home Assistant login name. When this person opens the panel they are linked to this entry. |
+| `innogym_email`, `innogym_password` | The INNODIGYM account. Stored in the add-on options (visible to Home Assistant admins and included in backups). |
+| `hevy_api_key` | Optional. Hevy API key (Hevy Pro: hevy.com, Settings, Developer). Switches on the push to Hevy. |
+| `hevy_since` | Optional, `YYYY-MM-DD`. Only workouts from this date on are sent to Hevy. Default: the day the key was first added, so your history is not uploaded. |
+
+Users created from the panel keep working; options only add to or update the users they list.
+
+### Hevy
+
+After each sync, new workouts (and manual ones) are created in Hevy once each. Exercises are matched to Hevy
+templates by name; when there is none, a custom exercise is created (free Hevy accounts allow only a few). Weights
+are sent as the machine reports them, which for combined exercises is per cable. Times are converted from the
+add-on's time zone to UTC. Hevy is never read back into InnoGym. This is a personal key used from your own add-on;
+Hevy's developer terms require its approval for apps offered to other people.
+
 ## Home Assistant entities
 
 Each person gets one device, "INNODIGYM <name>", created through MQTT discovery (retained, so it survives
@@ -83,7 +106,7 @@ who is logged in through the `X-Remote-User-*` headers, which the add-on trusts.
 
 ## Status
 
-Early version (0.1.2). The database, sync, panel screens and Home Assistant sensors are working; report anything
+Early version (0.2.0). The database, sync, panel screens and Home Assistant sensors are working; report anything
 that does not match this page.
 
 ---
