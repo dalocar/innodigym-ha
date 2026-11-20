@@ -33,6 +33,10 @@ function toast(msg, isErr) {
 }
 
 async function api(path, opts = {}) {
+  // Every request is counted in the shared sliding log the Exercise Progress sync paces itself against (Cloudflare
+  // rule: 60 per 10 s per IP). Paced sync calls record themselves when they get their slot (`paced: true`).
+  if (opts.paced) { opts = Object.assign({}, opts); delete opts.paced; }
+  else if (window.ExerciseProgressCore && ExerciseProgressCore.requestLog) ExerciseProgressCore.requestLog.record();
   const token = store.get(TOKEN_KEY);
   // FormData must go without a Content-Type so the browser adds the multipart boundary.
   const isForm = typeof FormData !== "undefined" && opts.body instanceof FormData;
@@ -53,6 +57,15 @@ async function api(path, opts = {}) {
     const msg = (body && (body.msg || body.proxyError)) || `HTTP ${res.status}`;
     const err = new Error(msg);
     err.body = body;
+    if (!res.ok) { // lets callers (Exercise Progress) retry 429/5xx and honour Retry-After
+      err.status = res.status;
+      const ra = res.headers && res.headers.get && res.headers.get("Retry-After");
+      if (ra) err.retryAfterRaw = ra;
+      // Any 429 (Cloudflare WAF block, whatever the body) starts the tab-wide Exercise Progress sync cooldown.
+      if (res.status === 429 && window.ExerciseProgressCore && ExerciseProgressCore.requestLog) {
+        ExerciseProgressCore.requestLog.noteBlock(ExerciseProgressCore.parseRetryAfter(ra));
+      }
+    }
     throw err;
   }
   return body;
@@ -77,9 +90,12 @@ function showLoggedIn(email) {
     return;
   }
   $("userbar").innerHTML = `<span id="user-email">${escapeHtml(email)}</span> <button id="logout-btn" class="secondary">${escapeHtml(t("Log out"))}</button>`;
-  $("logout-btn").onclick = () => {
+  $("logout-btn").onclick = async () => {
     store.remove(TOKEN_KEY);
     store.remove(EMAIL_KEY);
+    if (window.ExerciseProgressUI) ExerciseProgressUI.warmUp.stop(); // background warm-up ends with the session
+    // Wipe the on-device Exercise Progress cache (bounded wait so a stuck database never blocks logout).
+    try { if (window.ExerciseProgressUI) await Promise.race([ExerciseProgressUI.clearAll(), new Promise((r) => setTimeout(r, 2000))]); } catch (e) { /* reload anyway */ }
     location.reload();
   };
 }
@@ -307,43 +323,172 @@ async function renderEditor(isNew) {
   renderStepsTable();
 }
 
-// Weight input + read-only weight-mode badge (from sideNum: Per side / Combined / No weight).
-// A step stores exactly what the input shows; sideNum 0 has no weight, so the input is
-// disabled (its stored value is left untouched).
-// Same badge under the exercise name: shown instead of the one in the weight cell on narrow
-// screens (the 4-column card grid is too tight for "Combined"); hidden on desktop by CSS.
-function weightModeInline(step) {
-  const mode = WeightModeCore.modeFor(step.sideNum);
-  const badge = mode.label ? `<span class="wm-badge wm-badge-inline wm-${mode.key}" aria-hidden="true">${escapeHtml(t(mode.label))}</span>` : "";
-  // Combined: same live total under the name on narrow screens (aria-hidden; the one in the
-  // weight cell stays the accessible, announced copy and is only visually hidden there).
-  const total = mode.key === "combined" ? `<span class="wm-total wm-total-inline" aria-hidden="true">${escapeHtml(combinedTotalText(step))}</span>` : "";
-  return badge + total;
+// Weight mode of a step (from sideNum: Per side / Combined / No weight), a small read-only label under the
+// exercise name. Combined gets an info icon whose tooltip explains it (both cables work at once, the entered
+// load is per cable) with the live total. A step stores exactly what the load input shows; sideNum 0 has no
+// weight, so the input is disabled (its stored value is left untouched).
+const INFO_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>';
+
+// Combined (sideNum 2): both cables work at once, the entered number is the resistance on EACH cable and the
+// machine's workout screen shows the total. Computed from the stored tenths (see WeightModeCore.breakdown) in the
+// account unit. In a non-standard training mode there is no single load, so no total.
+function combinedTipText(step) {
+  const b = WeightModeCore.breakdown(step.sideNum, step.sideWeight);
+  if (!b.showTotal) return "";
+  if (StepModeCore.modeOf(step).id !== 0) return t("Combined: both cables work at once, so each force applies to each cable.");
+  const u = Units.label();
+  return t("Combined: both cables work at once and the load is per cable. {load} on each cable = {total} total.", {
+    load: `${Units.fmtTenths(b.perCable)} ${u}`, total: `${Units.fmtTenths(b.total)} ${u}`,
+  });
 }
 
-// Combined (sideNum 2): both cables work at once, the entered number is the resistance on
-// EACH cable and the machine's workout screen shows the total. Readout is computed from the
-// stored tenths (see WeightModeCore.totalTenths) in the account unit.
-function combinedTotalText(step) {
-  const b = WeightModeCore.breakdown(step.sideNum, step.sideWeight);
-  return b.showTotal ? t("×2 cables = {total} total", { total: `${Units.fmtTenths(b.total)} ${Units.label()}` }) : "";
+function weightModeBadge(step, i) {
+  const mode = WeightModeCore.modeFor(step.sideNum);
+  if (!mode.label) return "";
+  const badge = `<span class="wm-badge wm-${mode.key}" id="step-${i}-wm">${escapeHtml(t(mode.label))}</span>`;
+  if (mode.key !== "combined") return badge;
+  // Label and icon wrap together on narrow cards.
+  return `<span class="wm-group">${badge}<button type="button" class="wm-tip-btn" data-wm-tip="${i}" aria-expanded="false" aria-label="${escapeHtml(t("What does Combined mean?"))}" aria-describedby="step-${i}-tip">${INFO_ICON}</button></span>` +
+    `<span class="sr-only" id="step-${i}-tip">${escapeHtml(combinedTipText(step))}</span>`;
+}
+
+// One shared tooltip on <body> with fixed positioning (like the row menu), so the table's overflow container
+// can't clip it. Shows on hover and keyboard focus; a click or tap pins it until Escape, an outside tap or scroll.
+let wmTip = null;
+function hideWmTip() {
+  if (!wmTip) return;
+  wmTip.el.remove();
+  wmTip.btn.setAttribute("aria-expanded", "false");
+  wmTip = null;
+  document.removeEventListener("pointerdown", onWmTipOutside, true);
+  document.removeEventListener("keydown", onWmTipKey, true);
+  window.removeEventListener("scroll", hideWmTip, true);
+  window.removeEventListener("resize", hideWmTip);
+}
+function onWmTipOutside(e) { if (wmTip && !wmTip.btn.contains(e.target)) hideWmTip(); }
+function onWmTipKey(e) { if (e.key === "Escape") hideWmTip(); }
+function showWmTip(btn, step, pinned) {
+  if (wmTip && wmTip.btn === btn) { wmTip.pinned = wmTip.pinned || pinned; return; }
+  hideWmTip();
+  const el = document.createElement("div");
+  el.className = "wm-tip-pop";
+  el.setAttribute("role", "tooltip");
+  el.textContent = combinedTipText(step);
+  document.body.appendChild(el);
+  const r = btn.getBoundingClientRect();
+  const left = Math.min(Math.max(8, r.left + r.width / 2 - el.offsetWidth / 2), window.innerWidth - el.offsetWidth - 8);
+  const top = r.bottom + 8 + el.offsetHeight > window.innerHeight - 8 ? r.top - el.offsetHeight - 8 : r.bottom + 8;
+  el.style.left = `${Math.round(left)}px`;
+  el.style.top = `${Math.round(Math.max(8, top))}px`;
+  btn.setAttribute("aria-expanded", "true");
+  wmTip = { el, btn, step, pinned };
+  document.addEventListener("pointerdown", onWmTipOutside, true);
+  document.addEventListener("keydown", onWmTipKey, true);
+  window.addEventListener("scroll", hideWmTip, true);
+  window.addEventListener("resize", hideWmTip);
+}
+function setupWmTip(btn, step) {
+  btn.addEventListener("mouseenter", () => showWmTip(btn, step, false));
+  btn.addEventListener("mouseleave", () => { if (wmTip && wmTip.btn === btn && !wmTip.pinned) hideWmTip(); });
+  btn.addEventListener("focus", () => showWmTip(btn, step, false));
+  btn.addEventListener("blur", () => { if (wmTip && wmTip.btn === btn) hideWmTip(); });
+  btn.addEventListener("click", () => {
+    if (wmTip && wmTip.btn === btn && wmTip.pinned) hideWmTip();
+    else { hideWmTip(); showWmTip(btn, step, true); }
+  });
 }
 
 function weightCell(step, i) {
   const mode = WeightModeCore.modeFor(step.sideNum);
   const combined = mode.key === "combined";
-  const badge = mode.label
-    ? `<span class="wm-badge wm-${mode.key}" id="step-${i}-wm"${combined ? ` title="${escapeHtml(t("Resistance on each cable; both cables work at once"))}"` : ""}>${escapeHtml(t(mode.label))}</span>`
-    : "";
-  const total = combined ? `<span class="wm-total" id="step-${i}-total" aria-live="polite">${escapeHtml(combinedTotalText(step))}</span>` : "";
   const aria = Units.text(t(combined ? "Load per cable (kg)" : "Load (kg)"));
-  const describedBy = [mode.label ? `step-${i}-wm` : "", combined ? `step-${i}-total` : ""].filter(Boolean).join(" ");
-  return `<input type="number" min="0" step="0.1" id="step-${i}-sideWeight" name="step-${i}-sideWeight" data-field="sideWeight" aria-label="${escapeHtml(aria)}"${combined ? ` title="${escapeHtml(aria)}"` : ""}${describedBy ? ` aria-describedby="${describedBy}"` : ""}${mode.hasWeight ? "" : " disabled"} value="${Units.fmtTenths(step.sideWeight ?? 0)}">${badge}${total}`;
+  const describedBy = [mode.label ? `step-${i}-wm` : "", combined ? `step-${i}-tip` : ""].filter(Boolean).join(" ");
+  return `<input type="number" min="0" step="0.1" id="step-${i}-sideWeight" name="step-${i}-sideWeight" data-field="sideWeight" aria-label="${escapeHtml(aria)}"${combined ? ` title="${escapeHtml(aria)}"` : ""}${describedBy ? ` aria-describedby="${describedBy}"` : ""}${mode.hasWeight ? "" : " disabled"} value="${Units.fmtTenths(step.sideWeight ?? 0)}">`;
+}
+
+// Exercise Progress shortcut next to the exercise name: only for steps that have a weight (sideNum 1 or 2, or an unknown
+// mode with a weight set) and a known action. sideNum 0 steps (no weight) get none.
+// A course step points at its library action with actionLibraryId; workout sets use the same number as actionId.
+function stepActionId(step) {
+  const id = step.actionLibraryId != null && step.actionLibraryId !== "" ? step.actionLibraryId : step.actionId;
+  return id != null && Number(id) > 0 ? String(Number(id)) : "";
+}
+function hasProgressIcon(step) {
+  if (!window.ExerciseProgressUI || !stepActionId(step)) return false;
+  const mode = WeightModeCore.modeFor(step.sideNum);
+  return mode.key === "unknown" ? Number(step.sideWeight) > 0 : mode.hasWeight;
+}
+const PROGRESS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 20h18M5 16l4-5 4 3 6-8M15 6h4v4"/></svg>';
+function progressButton(step, i) {
+  const label = t("Progress for {name}", { name: step.actionName || t("step {n}", { n: i + 1 }) });
+  return `<button type="button" class="secondary step-progress-btn" id="step-${i}-progress" data-step-progress="${i}" aria-label="${escapeHtml(label)}" title="${escapeHtml(label)}">${PROGRESS_ICON}</button>`;
+}
+// Opens Exercise Progress ABOVE the editor (an overlay): the editor, its unsaved edits and its scroll position are never
+// touched, so Back is just closing the layer and putting focus back on the icon.
+function openStepProgress(step, i) {
+  ExerciseProgressUI.open(stepActionId(step), {
+    name: step.actionName || "", overlay: true,
+    onBack: () => { const b = $(`step-${i}-progress`); (b || $("edit-name")).focus({ preventScroll: true }); },
+  });
+}
+
+// ---------- training mode (Standard / Eccentric / Spring / Isokinetic), see step-mode-core.js ----------
+// Mode select under the exercise name. Steps without a weight (sideNum 0) and unknown modes (official
+// courses use 6) get no select: the stored mode is left untouched, unknown ones are just named.
+function modeSelect(step, i) {
+  const m = StepModeCore.modeOf(step);
+  if (!StepModeCore.supportsMode(step)) return "";
+  if (!m.known) return `<span class="step-mode-note">${escapeHtml(t("Mode {n}", { n: m.id }))}</span>`;
+  const opts = StepModeCore.MODES.map((d) => `<option value="${d.id}"${d.id === m.id ? " selected" : ""}>${escapeHtml(t(d.label))}</option>`).join("");
+  const label = t("Mode for {name}", { name: step.actionName || t("step {n}", { n: i + 1 }) });
+  return `<select class="step-mode" id="step-${i}-mode" data-step-mode="${i}" aria-label="${escapeHtml(label)}" title="${escapeHtml(t(StepModeCore.DESCRIPTIONS[m.id]))}">${opts}</select>`;
+}
+
+// Imperial accounts also get the lb keys the official app writes (kg stays the source of truth).
+function modeOpts() { return { imperial: Units.isImperial() }; }
+
+// Force fields show in the account unit (stored in tenths of a kg); length and speed in m and m/s (stored in mm).
+// `lb` is the stored lb tenths for this field when known (see StepModeCore.lbValues): shown as is on imperial accounts.
+function modeFieldValue(f, stored, lb) {
+  if (f.unit !== "force") return (stored / 1000).toFixed(2);
+  return lb !== undefined && Units.isImperial() ? (lb / 10).toFixed(1) : Units.fmtTenths(stored);
+}
+// Typed values snap to the field's step in the display unit (0.5 kg or lb, 0.01 m or m/s), as the official app does.
+function modeFieldStored(f, shown) {
+  const snapped = Math.round(shown / f.step) * f.step;
+  return f.unit === "force" ? Units.toTenths(snapped) : Math.round(snapped * 1000);
+}
+
+function modeFieldsCell(step, i) {
+  const m = StepModeCore.modeOf(step);
+  const vals = StepModeCore.values(step);
+  const lbs = StepModeCore.lbValues(step);
+  return `<div class="mode-fields">${m.def.fields.map((f) => {
+    const id = `step-${i}-${f.key}`;
+    const label = f.unit === "force" ? Units.text(t(f.label)) : t(f.label);
+    return `<label class="mode-field" for="${id}"><span>${escapeHtml(label)}</span><input type="number" min="${modeFieldValue(f, f.min)}" max="${modeFieldValue(f, f.max)}" step="${f.step}" id="${id}" name="${id}" data-mode-key="${f.key}" value="${modeFieldValue(f, vals[f.key], lbs[f.key])}"></label>`;
+  }).join("")}</div>`;
+}
+
+// Is this step's load column showing mode fields instead of the plain weight?
+function usesModeFields(step) {
+  const m = StepModeCore.modeOf(step);
+  return StepModeCore.supportsMode(step) && m.known && m.id !== 0;
+}
+
+function renderBulkModeSelect() {
+  const sel = $("steps-mode-all");
+  if (!sel) return;
+  sel.innerHTML = `<option value="">${escapeHtml(t("Choose…"))}</option>` +
+    StepModeCore.MODES.map((d) => `<option value="${d.id}">${escapeHtml(t(d.label))}</option>`).join("");
+  sel.value = "";
 }
 
 function renderStepsTable() {
   const body = $("steps-body");
+  hideWmTip();
   body.innerHTML = "";
+  renderBulkModeSelect();
   // Warm-up and stretch steps (added in the official app) are kept untouched on save but not editable here.
   const extra = [["Warm up", currentCourse.warmUpStepList], ["Stretch", currentCourse.relaxStepList]]
     .filter(([, l]) => Array.isArray(l) && l.length)
@@ -359,9 +504,9 @@ function renderStepsTable() {
       </td>
       <td class="thumb">${step.picUrl ? `<img src="${escapeHtml(step.picUrl)}" alt="">` : ""}</td>
       <td class="num">${i + 1}</td>
-      <td class="action-name">${escapeHtml(step.actionName || "")}${weightModeInline(step)}</td>
+      <td class="action-name"><div class="an-title"><span class="an-name">${escapeHtml(step.actionName || "")}</span>${hasProgressIcon(step) ? progressButton(step, i) : ""}</div><div class="an-sub">${modeSelect(step, i)}${weightModeBadge(step, i)}</div></td>
       <td class="field" data-label="${t("Reps")}"><input type="number" min="0" id="step-${i}-count" name="step-${i}-count" data-field="count" aria-label="${t("Reps")}" value="${step.count ?? 0}"></td>
-      <td class="field" data-label="${escapeHtml(Units.text(t("Load (kg)")))}">${weightCell(step, i)}</td>
+      <td class="field${usesModeFields(step) ? " mode-cell" : ""}" data-label="${escapeHtml(usesModeFields(step) ? t("Mode settings") : Units.text(t("Load (kg)")))}">${usesModeFields(step) ? modeFieldsCell(step, i) : weightCell(step, i)}</td>
       <td class="field" data-label="${t("Rest (s)")}"><input type="number" min="0" id="step-${i}-restTime" name="step-${i}-restTime" data-field="restTime" aria-label="${t("Rest (s)")}" value="${step.restTime ?? 0}"></td>
       <td class="field" data-label="${t("Sets")}"><input type="number" min="0" id="step-${i}-groupNum" name="step-${i}-groupNum" data-field="groupNum" aria-label="${t("Sets")}" value="${step.groupNum ?? 0}"></td>
       <td class="row-actions">
@@ -370,7 +515,34 @@ function renderStepsTable() {
     `;
     const thumb = tr.querySelector("td.thumb img");
     if (thumb) thumb.addEventListener("click", () => openLightbox(step.picUrl, step.videoUrl, step.actionName));
-    tr.querySelectorAll("input").forEach((input) => {
+    tr.classList.toggle("has-mode", usesModeFields(step));
+    const modeSel = tr.querySelector("[data-step-mode]");
+    if (modeSel) modeSel.addEventListener("change", () => {
+      StepModeCore.setMode(step, Number(modeSel.value), modeOpts());
+      renderStepsTable();
+      const again = $(`step-${i}-mode`);
+      if (again) again.focus({ preventScroll: true });
+    });
+    tr.querySelectorAll("input[data-mode-key]").forEach((input) => {
+      const f = StepModeCore.modeOf(step).def.fields.find((x) => x.key === input.dataset.modeKey);
+      // Commit when the field is left or Enter is pressed (not per keystroke: a half-typed "4" of "40" would
+      // trip the pair rules and pull the other field down for good), like the official app.
+      input.addEventListener("change", () => {
+        const val = Number(input.value);
+        // Empty, non-numeric or negative input is clamped up to the field's minimum.
+        const bad = input.value === "" || !Number.isFinite(val) || val < 0;
+        // On imperial accounts the typed pounds are kept in the lb key too (kg is derived, as in the official app).
+        const typed = !bad && f.unit === "force" && Units.isImperial() ? Math.round(Math.round(val / f.step) * f.step * 10) : null;
+        StepModeCore.setValue(step, f.key, bad ? 0 : modeFieldStored(f, val), Object.assign(modeOpts(), typed ? { typed } : {}));
+        // Show what is kept (range, step and pair rules applied) for every field: editing one can move another.
+        const kept = StepModeCore.values(step), lbs = StepModeCore.lbValues(step);
+        tr.querySelectorAll("input[data-mode-key]").forEach((el) => {
+          const g = StepModeCore.modeOf(step).def.fields.find((x) => x.key === el.dataset.modeKey);
+          el.value = modeFieldValue(g, kept[g.key], lbs[g.key]);
+        });
+      });
+    });
+    tr.querySelectorAll("input[data-field]").forEach((input) => {
       input.addEventListener("input", () => {
         const val = Number(input.value);
         if (!Number.isFinite(val)) return;
@@ -378,10 +550,16 @@ function renderStepsTable() {
         // shows/accepts the account unit (kg or lb), so convert back to tenths of kg here.
         step[input.dataset.field] = input.dataset.field === "sideWeight" ? Units.toTenths(val) : val;
         if (input.dataset.field === "sideWeight") {
-          tr.querySelectorAll(".wm-total").forEach((el) => { el.textContent = combinedTotalText(step); });
+          const tip = $(`step-${i}-tip`);
+          if (tip) tip.textContent = combinedTipText(step);
+          if (wmTip && wmTip.step === step) wmTip.el.textContent = combinedTipText(step);
         }
       });
     });
+    const tipBtn = tr.querySelector("[data-wm-tip]");
+    if (tipBtn) setupWmTip(tipBtn, step);
+    const progressBtn = tr.querySelector("[data-step-progress]");
+    if (progressBtn) { tr.classList.add("has-progress"); progressBtn.addEventListener("click", () => openStepProgress(step, i)); }
     const menuBtn = tr.querySelector(".row-menu-btn");
     menuBtn.addEventListener("click", () => toggleRowMenu(i, menuBtn, total));
     setupReorder(tr, i);
@@ -592,8 +770,18 @@ function addStepFromAction(a) {
   renderStepsTable();
 }
 
+if ($("steps-mode-all")) $("steps-mode-all").addEventListener("change", (e) => {
+  const id = e.target.value;
+  if (id === "" || !currentCourse) return;
+  const n = StepModeCore.setModeAll(currentCourse.mainStepList, Number(id), modeOpts());
+  e.target.value = "";
+  renderStepsTable();
+  toast(n ? t("Mode set on {n} steps.", { n }) : t("No steps changed."));
+});
+
 async function saveProgram() {
   if (!currentCourse) return;
+  (currentCourse.mainStepList || []).forEach((s) => StepModeCore.normalize(s, modeOpts()));
   currentCourse.name = $("edit-name").value;
   // Recompute rough aggregates so the list view isn't wildly stale. Not an exact
   // formula match to the server's own calculation, purely cosmetic.
@@ -1035,6 +1223,7 @@ async function deleteRecord(id) {
   try {
     await api(`/sport/record/delete/${id}`, { method: "POST" });
     toast(t("Deleted."));
+    if (window.ExerciseProgressUI) ExerciseProgressUI.forgetWorkout(id);
     loadHistory();
   } catch (e) {
     toast(t("Delete failed: {msg}", { msg: e.message }), true);
@@ -1144,6 +1333,7 @@ $("login-form").addEventListener("submit", async (e) => {
     Units.load(api);
     showLoggedIn(email);
     switchTab("programs");
+    if (window.ExerciseProgressUI) ExerciseProgressUI.warmUp.start();
   } catch (ex) {
     err.textContent = ex.message;
     err.hidden = false;
@@ -1206,5 +1396,6 @@ Units.onChange(() => {
     Units.load(api);
     showLoggedIn(email);
     switchTab("programs");
+    // (the background warm-up for an existing session starts from exercise-progress.js, which loads after this file)
   }
 })();

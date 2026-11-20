@@ -1,5 +1,5 @@
 name: InnoGym
-version: "0.1.1"
+version: "0.1.2"
 slug: innodigym
 description: Keeps your INNODIGYM Power workouts in Home Assistant and shows your progress.
 url: https://github.com/dalocar/innodigym-ha
