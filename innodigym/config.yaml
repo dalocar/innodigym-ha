@@ -1,5 +1,5 @@
 name: InnoGym
-version: "0.2.1"
+version: "0.3.0"
 slug: innodigym
 description: Keeps your INNODIGYM Power workouts in Home Assistant and shows your progress.
 url: https://github.com/dalocar/innodigym-ha
@@ -19,9 +19,11 @@ options:
   sync_interval_minutes: 10
   discovery_prefix: homeassistant
   users: []
+  timezone: ""
 schema:
   sync_interval_minutes: int(5,120)
   discovery_prefix: str
+  timezone: str?
   users:
     - name: str
       ha_user: str?
@@ -29,3 +31,4 @@ schema:
       innogym_password: password?
       hevy_api_key: password?
       hevy_since: match(^\d{4}-\d{2}-\d{2}$)?
+      hevy_actions: str?

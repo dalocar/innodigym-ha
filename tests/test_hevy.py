@@ -168,6 +168,45 @@ class PushTest(Base):
         hevy.push_user(self.conn, u, FakeHevy({"row": "R", "press": "P"}))
         self.assertEqual(hevy.counts(self.conn, u), {"sent": 2, "waiting": 0})
 
+    def test_template_matching_rules(self):
+        t = {"squat (barbell)": "A", "squat (dumbbell)": "B", "plank": "P", "row (cable)": "R", "bench press": "BP"}
+        self.assertEqual(hevy.resolve_template("Plank", t), "P")
+        self.assertEqual(hevy.resolve_template("Row", t), "R")              # one bracketed variant
+        self.assertIsNone(hevy.resolve_template("Squat", t))                # ambiguous -> custom
+        self.assertIsNone(hevy.resolve_template("Chest Press", t))
+        self.assertEqual(hevy.resolve_template("Squat", t, "Squat (Dumbbell)"), "B")
+        self.assertEqual(hevy.resolve_template("Squat", t, "DEADBEEF"), "DEADBEEF")
+        with self.assertRaises(hevy.HevyError):
+            hevy.resolve_template("Squat", t, "Nonexistent")
+
+    def test_option_mapping_beats_everything_and_bad_one_is_reported(self):
+        u = self.user(hevy_api_key="k", hevy_since="2026-11-01", hevy_actions="Row = Row (Cable); press=Overhead Press")
+        self.workout(u["id"])
+        client = FakeHevy({"row (cable)": "R", "overhead press": "O"})
+        self.assertEqual(hevy.push_user(self.conn, u, client)["pushed"], 1)
+        self.assertEqual([e["exercise_template_id"] for e in client.workouts[0]["exercises"]], ["R", "O"])
+        self.assertEqual(client.created_templates, [])
+        u2 = self.user(hevy_api_key="k", hevy_since="2026-11-01", hevy_actions="Row=Nope")
+        self.workout(u2["id"], when="2026-11-16 10:00:00")
+        r = hevy.push_user(self.conn, u2, FakeHevy({"row": "x"}))
+        self.assertEqual(r["pushed"], 0)
+        self.assertIn("not a Hevy exercise", r["error"])
+
+    def test_timezone_is_applied(self):
+        from zoneinfo import ZoneInfo
+        u = self.user(hevy_api_key="k", hevy_since="2026-01-01")
+        self.workout(u["id"], when="2026-07-14 10:00:00")
+        c = FakeHevy({"row": "R", "press": "P"})
+        hevy.push_user(self.conn, u, c, tz=ZoneInfo("Europe/Madrid"))
+        self.assertEqual(c.workouts[0]["start_time"], "2026-07-14T08:00:00Z")   # CEST, UTC+2
+
+    def test_user_without_vendor_login_still_gets_manual_workouts_pushed(self):
+        u = self.user(hevy_api_key="k", hevy_since="2026-11-01")
+        self.workout(u["id"])
+        h = FakeHevy({"row": "R", "press": "P"})
+        out = sync.sync_all(self.conn, lambda t: self.fail("no vendor call expected"), make_hevy=lambda key: h)
+        self.assertEqual(out["Alex"]["hevy"]["pushed"], 1)
+
     def test_exercise_types(self):
         s = lambda w, r, d=0: {"weight_kg": w, "reps": r, "duration_s": d}  # noqa: E731
         self.assertEqual(hevy.exercise_type([s(10, 5)]), "weight_reps")

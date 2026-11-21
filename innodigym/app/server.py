@@ -33,7 +33,7 @@ DATA_DIR = os.environ.get("INNODIGYM_DATA_DIR")
 DB = None          # sqlite3 connection, opened in main()
 WORKER = None      # background sync thread, started in main()
 PUBLISHER = mqtt.Publisher(None)  # replaced in main() when a broker is available
-OPTIONS = {"sync_interval_minutes": 10, "discovery_prefix": "homeassistant", "users": []}
+OPTIONS = {"sync_interval_minutes": 10, "discovery_prefix": "homeassistant", "users": [], "timezone": ""}
 
 
 def load_options(data_dir):
@@ -226,7 +226,8 @@ def main():
                 c.close()
         threading.Thread(target=initial, daemon=True, name="mqtt-initial").start()
         WORKER = sync.SyncWorker(os.path.join(DATA_DIR, "innodigym.db"), OPTIONS["sync_interval_minutes"],
-                                 on_user=mqtt.sync_hook(PUBLISHER))
+                                 on_user=mqtt.sync_hook(PUBLISHER),
+                                 tz=hevy.resolve_timezone(OPTIONS.get("timezone")))
         WORKER.start()
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"Serving on http://0.0.0.0:{PORT}  (proxying /api/* to {UPSTREAM})")

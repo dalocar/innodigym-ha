@@ -16,7 +16,7 @@ import json
 import sqlite3
 import time
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _MIGRATIONS = {
     1: """
@@ -97,6 +97,9 @@ _MIGRATIONS = {
         template_id TEXT NOT NULL,           -- Hevy exercise template id
         PRIMARY KEY (user_id, exercise)
     );
+    """,
+    3: """
+    ALTER TABLE users ADD COLUMN hevy_map TEXT;   -- JSON {InnoGym exercise (lower case): Hevy title or template id}
     """,
 }
 

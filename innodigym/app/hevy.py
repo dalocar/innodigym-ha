@@ -12,6 +12,8 @@ template is created. Weights stay as the machine reports them (per cable for com
 from __future__ import annotations
 
 import json
+import os
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -87,6 +89,54 @@ class HevyClient:
         w = d.get("workout")
         w = w[0] if isinstance(w, list) and w else w
         return str((w or {}).get("id") or "")
+
+
+_TEMPLATE_ID = re.compile(r"^[0-9A-Fa-f]{8}$")
+
+
+def resolve_template(name, templates, override=None):
+    """Hevy template id for an InnoGym exercise name, or None when a custom one has to be created.
+    templates: {title.lower(): id}. Order: the user's override (a Hevy title or an 8-character id; an override
+    that matches nothing raises HevyError rather than silently creating something else), exact title, then a
+    title that differs only by a bracketed qualifier ("Plank" -> "Plank (Weighted)") when exactly one does."""
+    if override:
+        if _TEMPLATE_ID.match(override) and override not in templates:
+            return override
+        tid = templates.get(override.strip().lower())
+        if not tid:
+            raise HevyError('options map "%s" to "%s", which is not a Hevy exercise' % (name, override))
+        return tid
+    key = name.strip().lower()
+    if key in templates:
+        return templates[key]
+    same = {tid for title, tid in templates.items() if re.sub(r"\s*\([^)]*\)\s*$", "", title) == key}
+    return same.pop() if len(same) == 1 else None
+
+
+def supervisor_timezone(timeout=5):
+    """IANA time zone configured in Home Assistant (Supervisor /info), or None outside the add-on."""
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        return None
+    try:
+        req = urllib.request.Request("http://supervisor/info", headers={"Authorization": "Bearer " + token})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return (json.loads(r.read()).get("data") or {}).get("timezone")
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def resolve_timezone(configured=None):
+    """tzinfo for InnoGym's local timestamps: the `timezone` option, else Home Assistant's, else TZ, else the
+    container's own zone (None). Unknown names are ignored with a log line."""
+    from zoneinfo import ZoneInfo
+    for name in (configured, supervisor_timezone(), os.environ.get("TZ")):
+        if name:
+            try:
+                return ZoneInfo(name.lstrip(":"))
+            except Exception:  # noqa: BLE001 - bad name or no tz database
+                print("hevy: time zone %r not usable" % name, flush=True)
+    return None
 
 
 def exercise_type(sets):
@@ -167,19 +217,24 @@ def push_user(conn, user, client, tz=None, now=None):
         " AND EXISTS (SELECT 1 FROM sets s WHERE s.user_id=workouts.user_id AND s.workout_id=workouts.id)"
         " ORDER BY started_at LIMIT ?", (uid, since, MAX_ATTEMPTS, MAX_PER_RUN)).fetchall()
     errors = []
+    try:
+        overrides = json.loads(user["hevy_map"] or "{}")
+    except ValueError:
+        overrides = {}
     if pending:
         cache = {}
 
         def template_for(name, group):
             if name in cache:
                 return cache[name]
-            row = conn.execute("SELECT template_id FROM hevy_exercises WHERE user_id=? AND exercise=?",
-                               (uid, name)).fetchone()
+            override = overrides.get(name.strip().lower())
+            row = None if override else conn.execute(
+                "SELECT template_id FROM hevy_exercises WHERE user_id=? AND exercise=?", (uid, name)).fetchone()
             tid = row[0] if row else None
             if not tid:
                 if "templates" not in cache:
                     cache["templates"] = client.templates()
-                tid = cache["templates"].get(name.strip().lower()) or client.create_template(name, exercise_type(group))
+                tid = resolve_template(name, cache["templates"], override) or client.create_template(name, exercise_type(group))
                 with conn:
                     conn.execute("INSERT OR REPLACE INTO hevy_exercises (user_id, exercise, template_id) VALUES (?,?,?)",
                                  (uid, name, tid))

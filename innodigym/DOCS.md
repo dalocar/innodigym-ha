@@ -12,6 +12,7 @@ progress stay yours even if the vendor app changes or your account is closed.
 | Option | Default | Meaning |
 |---|---|---|
 | `sync_interval_minutes` | 10 | How often new workouts are fetched (5 to 120). |
+| `timezone` | (Home Assistant's) | Optional, e.g. `Europe/Madrid`. Zone of the workout times, used when sending to Hevy. Empty uses the zone set in Home Assistant. |
 | `discovery_prefix` | `homeassistant` | MQTT discovery prefix; change it only if you changed it in Home Assistant. |
 
 People and their INNODIGYM accounts are added inside the InnoGym panel, not in these options.
@@ -27,16 +28,19 @@ the add-on logs in again by itself whenever the INNODIGYM token expires.
 | `ha_user` | Home Assistant login name. When this person opens the panel they are linked to this entry. |
 | `innogym_email`, `innogym_password` | The INNODIGYM account. Stored in the add-on options (visible to Home Assistant admins and included in backups). |
 | `hevy_api_key` | Optional. Hevy API key (Hevy Pro: hevy.com, Settings, Developer). Switches on the push to Hevy. |
+| `hevy_actions` | Optional. Choose the Hevy exercise for an InnoGym action: `Squat=Squat (Barbell); Row=Seated Cable Row`. The Hevy side is its exact title or its 8-character id. |
 | `hevy_since` | Optional, `YYYY-MM-DD`. Only workouts from this date on are sent to Hevy. Default: the day the key was first added, so your history is not uploaded. |
 
 Users created from the panel keep working; options only add to or update the users they list.
 
 ### Hevy
 
-After each sync, new workouts (and manual ones) are created in Hevy once each. Exercises are matched to Hevy
-templates by name; when there is none, a custom exercise is created (free Hevy accounts allow only a few). Weights
+After each sync, new workouts (and manual ones) are created in Hevy once each. Each InnoGym action is matched to a Hevy
+exercise in this order: your `hevy_actions` mapping, the exact title, then a title that only adds a bracketed
+qualifier when exactly one does ("Row" and "Row (Cable)"). When nothing matches, a custom exercise is created and
+remembered (Hevy cannot delete custom exercises through the API; free accounts allow only a few). Weights
 are sent as the machine reports them, which for combined exercises is per cable. Times are converted from the
-add-on's time zone to UTC. Hevy is never read back into InnoGym. This is a personal key used from your own add-on;
+`timezone` option (or Home Assistant's zone) to UTC. Hevy is never read back into InnoGym. This is a personal key used from your own add-on;
 Hevy's developer terms require its approval for apps offered to other people.
 
 ## Home Assistant entities
@@ -106,7 +110,7 @@ who is logged in through the `X-Remote-User-*` headers, which the add-on trusts.
 
 ## Status
 
-Early version (0.2.1). The database, sync, panel screens and Home Assistant sensors are working; report anything
+Early version (0.3.0). The database, sync, panel screens and Home Assistant sensors are working; report anything
 that does not match this page.
 
 ---

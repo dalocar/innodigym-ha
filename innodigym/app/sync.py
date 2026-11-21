@@ -186,18 +186,21 @@ def _sync_one(conn, u, make_client):
     return r
 
 
-def sync_all(conn, make_client, on_user=None, make_hevy=hevy.HevyClient):
+def sync_all(conn, make_client, on_user=None, make_hevy=hevy.HevyClient, tz=None):
     """Run every user that has a token or login. make_client(token) returns a vendor client,
     make_hevy(api_key) a Hevy client. on_user(conn, user, result, first_run) is called after each user;
     its errors never stop the loop."""
     out = {}
     for u in db.list_users(conn):
-        if not u["token"] and not (u["vendor_email"] and u["vendor_password"]):
+        has_vendor = bool(u["token"] or (u["vendor_email"] and u["vendor_password"]))
+        if not has_vendor and not (u["hevy_api_key"] and make_hevy):
             continue
         first_run = db.last_sync(conn, u["id"]) is None
-        out[u["name"]] = r = _sync_one(conn, u, make_client)
+        # a user with only a Hevy key (manual workouts) has nothing to fetch but still gets the push
+        out[u["name"]] = r = _sync_one(conn, u, make_client) if has_vendor else {
+            "fetched": 0, "inserted": 0, "details": 0, "error": None, "new_ids": []}
         if u["hevy_api_key"] and make_hevy:
-            r["hevy"] = hevy.push_user(conn, db.get_user(conn, u["id"]), make_hevy(u["hevy_api_key"]))
+            r["hevy"] = hevy.push_user(conn, db.get_user(conn, u["id"]), make_hevy(u["hevy_api_key"]), tz=tz)
         if on_user:
             try:
                 on_user(conn, u, r, first_run)
@@ -210,9 +213,9 @@ class SyncWorker(threading.Thread):
     """Background thread. Opens its own database connection (SQLite connections should not be
     shared between threads), runs sync_all every interval, and runs early when trigger() is called."""
 
-    def __init__(self, db_path, interval_minutes=10, make_client=VendorClient, on_user=None):
+    def __init__(self, db_path, interval_minutes=10, make_client=VendorClient, on_user=None, tz=None):
         super().__init__(daemon=True, name="sync-worker")
-        self.on_user = on_user
+        self.on_user, self.tz = on_user, tz
         self.db_path, self.interval, self.make_client = db_path, interval_minutes * 60, make_client
         self._wake, self._stop_flag = threading.Event(), threading.Event()
 
@@ -227,7 +230,7 @@ class SyncWorker(threading.Thread):
         conn = db.connect(self.db_path)
         while not self._stop_flag.is_set():
             try:
-                for name, r in sync_all(conn, self.make_client, self.on_user).items():
+                for name, r in sync_all(conn, self.make_client, self.on_user, tz=self.tz).items():
                     print("sync %s: %d seen, %d new, %d with sets%s" % (
                         name, r["fetched"], r["inserted"], r["details"],
                         ", error: " + r["error"] if r["error"] else "") +
