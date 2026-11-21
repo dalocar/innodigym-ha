@@ -58,4 +58,7 @@ def apply_options(conn, entries):
             if password and email and email != old["vendor_email"]:
                 conn.execute("UPDATE users SET token=NULL WHERE id=?", (uid,))
         ids.append(uid)
+    # a restart (new options, new version) gives workouts Hevy had rejected a fresh set of attempts
+    with conn:
+        conn.execute("UPDATE workouts SET hevy_attempts=0 WHERE hevy_id IS NULL AND hevy_attempts>0")
     return ids

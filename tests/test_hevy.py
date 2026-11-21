@@ -207,6 +207,40 @@ class PushTest(Base):
         out = sync.sync_all(self.conn, lambda t: self.fail("no vendor call expected"), make_hevy=lambda key: h)
         self.assertEqual(out["Alex"]["hevy"]["pushed"], 1)
 
+    def test_non_json_reply_says_what_came_back(self):
+        import http.server, threading
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200); self.send_header("Content-Type", "text/html"); self.end_headers()
+                self.wfile.write(b"<html>  Just a moment...  </html>")
+            log_message = lambda *a: None  # noqa: E731
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            with self.assertRaises(hevy.HevyError) as cm:
+                hevy.HevyClient("k", base="http://127.0.0.1:%d" % srv.server_address[1]).get("/v1/exercise_templates?page=1")
+        finally:
+            srv.shutdown()
+        msg = str(cm.exception)
+        for part in ("GET /v1/exercise_templates", "HTTP 200", "text/html", "Just a moment"):
+            self.assertIn(part, msg)
+
+    def test_unexpected_error_in_one_workout_does_not_escape(self):
+        u = self.user(hevy_api_key="k", hevy_since="2026-11-01")
+        self.workout(u["id"])
+        class Boom(FakeHevy):
+            def create_workout(self, w):
+                raise KeyError("id")
+        r = hevy.push_user(self.conn, u, Boom({"row": "R", "press": "P"}))
+        self.assertIn("unexpected KeyError", r["error"])
+
+    def test_restart_gives_rejected_workouts_new_attempts(self):
+        u = self.user(hevy_api_key="k", hevy_since="2026-11-01")
+        self.workout(u["id"])
+        self.conn.execute("UPDATE workouts SET hevy_attempts=5")
+        accounts.apply_options(self.conn, [{"name": "Alex", "hevy_api_key": "k"}])
+        self.assertEqual(self.conn.execute("SELECT hevy_attempts FROM workouts").fetchone()[0], 0)
+
     def test_exercise_types(self):
         s = lambda w, r, d=0: {"weight_kg": w, "reps": r, "duration_s": d}  # noqa: E731
         self.assertEqual(hevy.exercise_type([s(10, 5)]), "weight_reps")

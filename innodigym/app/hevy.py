@@ -43,9 +43,10 @@ class HevyClient:
             self.base + path, method=method,
             data=json.dumps(body).encode() if body is not None else None,
             headers={"api-key": self.key, "Content-Type": "application/json", "Accept": "application/json"})
+        what = "%s %s" % (method, path.split("?")[0])
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
-                raw = r.read()
+                raw, status, ctype = r.read(), r.status, r.headers.get("Content-Type", "?")
         except urllib.error.HTTPError as e:
             detail = ""
             try:
@@ -53,13 +54,14 @@ class HevyClient:
                 detail = j.get("message") or j.get("error") or ""
             except ValueError:
                 pass
-            raise HevyError("HTTP %d %s" % (e.code, detail), status=e.code)
+            raise HevyError("%s: HTTP %d %s" % (what, e.code, detail), status=e.code)
         except (urllib.error.URLError, OSError) as e:
-            raise HevyError("network: %s" % getattr(e, "reason", e))
+            raise HevyError("%s: network: %s" % (what, getattr(e, "reason", e)))
         try:
             return json.loads(raw) if raw else {}
         except ValueError:
-            raise HevyError("reply was not JSON")
+            snippet = " ".join(raw[:150].decode("utf-8", "replace").split())
+            raise HevyError("%s: HTTP %s, reply was not JSON (%s): %s" % (what, status, ctype, snippet))
 
     def get(self, path):
         return self._call("GET", path)
@@ -82,6 +84,8 @@ class HevyClient:
         d = self.post("/v1/exercise_templates", {"exercise": {
             "title": title, "exercise_type": exercise_type,
             "equipment_category": "machine", "muscle_group": "other"}})
+        if not isinstance(d, dict) or d.get("id") in (None, ""):
+            raise HevyError("POST /v1/exercise_templates: reply has no id: %.150s" % json.dumps(d))
         return str(d["id"])
 
     def create_workout(self, workout):
@@ -255,6 +259,12 @@ def push_user(conn, user, client, tz=None, now=None):
                     with conn:
                         conn.execute("UPDATE workouts SET hevy_attempts=hevy_attempts+1, hevy_error=? WHERE user_id=? AND id=?",
                                      (str(e), uid, w["id"]))
+                    continue
+                except Exception as e:  # noqa: BLE001 - one odd workout must not stop the others or the worker
+                    errors.append("%s: unexpected %s: %s" % (w["started_at"][:10], type(e).__name__, e))
+                    with conn:
+                        conn.execute("UPDATE workouts SET hevy_attempts=hevy_attempts+1, hevy_error=? WHERE user_id=? AND id=?",
+                                     (errors[-1], uid, w["id"]))
                     continue
                 with conn:
                     conn.execute("UPDATE workouts SET hevy_id=?, hevy_error=NULL WHERE user_id=? AND id=?",
