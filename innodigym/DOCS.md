@@ -106,7 +106,7 @@ who is logged in through the `X-Remote-User-*` headers, which the add-on trusts.
 
 ## Status
 
-Early version (0.2.0). The database, sync, panel screens and Home Assistant sensors are working; report anything
+Early version (0.2.1). The database, sync, panel screens and Home Assistant sensors are working; report anything
 that does not match this page.
 
 ---
