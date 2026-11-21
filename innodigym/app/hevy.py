@@ -38,7 +38,7 @@ class HevyClient:
     def __init__(self, api_key, base=BASE, timeout=20):
         self.key, self.base, self.timeout = api_key, base, timeout
 
-    def _call(self, method, path, body=None):
+    def _call(self, method, path, body=None, lenient=False):
         req = urllib.request.Request(
             self.base + path, method=method,
             data=json.dumps(body).encode() if body is not None else None,
@@ -60,6 +60,8 @@ class HevyClient:
         try:
             return json.loads(raw) if raw else {}
         except ValueError:
+            if lenient:   # some replies are plain text, e.g. the id from creating an exercise template
+                return {"_text": raw.decode("utf-8", "replace").strip()}
             snippet = " ".join(raw[:150].decode("utf-8", "replace").split())
             raise HevyError("%s: HTTP %s, reply was not JSON (%s): %s" % (what, status, ctype, snippet))
 
@@ -81,12 +83,16 @@ class HevyClient:
             page += 1
 
     def create_template(self, title, exercise_type):
-        d = self.post("/v1/exercise_templates", {"exercise": {
+        """Create a custom exercise and return its id. Hevy answers with the bare id as text/html
+        (documented as {"id": 123}), so JSON objects, JSON scalars and plain text are all accepted."""
+        d = self._call("POST", "/v1/exercise_templates", {"exercise": {
             "title": title, "exercise_type": exercise_type,
-            "equipment_category": "machine", "muscle_group": "other"}})
-        if not isinstance(d, dict) or d.get("id") in (None, ""):
-            raise HevyError("POST /v1/exercise_templates: reply has no id: %.150s" % json.dumps(d))
-        return str(d["id"])
+            "equipment_category": "machine", "muscle_group": "other"}}, lenient=True)
+        tid = d.get("_text", d.get("id")) if isinstance(d, dict) else d
+        tid = str(tid if tid is not None else "").strip().strip('"')
+        if not re.fullmatch(r"[0-9A-Za-z-]{1,64}", tid):
+            raise HevyError("POST /v1/exercise_templates: no usable id in the reply: %.150s" % json.dumps(d))
+        return tid
 
     def create_workout(self, workout):
         d = self.post("/v1/workouts", {"workout": workout})
@@ -193,7 +199,11 @@ def build_workout(w, sets, template_for, tz=None):
     for name, group in _groups(sets):
         tid = template_for(name, group)
         kind = exercise_type(group)
-        exercises.append({"exercise_template_id": tid, "sets": [_set(s, kind) for s in group]})
+        out = [_set(s, kind) for s in group]
+        if exercises and exercises[-1]["exercise_template_id"] == tid:
+            exercises[-1]["sets"].extend(out)   # L/R actions that map to one Hevy exercise form one block
+        else:
+            exercises.append({"exercise_template_id": tid, "sets": out})
     return {"title": w["name"] or "Workout", "description": "Logged by InnoGym", "is_private": False,
             "start_time": _iso(w["started_at"], tz), "end_time": _iso(end.strftime(FMT), tz),
             "exercises": exercises}
@@ -238,7 +248,10 @@ def push_user(conn, user, client, tz=None, now=None):
             if not tid:
                 if "templates" not in cache:
                     cache["templates"] = client.templates()
-                tid = resolve_template(name, cache["templates"], override) or client.create_template(name, exercise_type(group))
+                tid = resolve_template(name, cache["templates"], override)
+                if not tid:
+                    tid = client.create_template(name, exercise_type(group))
+                    cache["templates"][name.strip().lower()] = tid
                 with conn:
                     conn.execute("INSERT OR REPLACE INTO hevy_exercises (user_id, exercise, template_id) VALUES (?,?,?)",
                                  (uid, name, tid))
@@ -250,6 +263,12 @@ def push_user(conn, user, client, tz=None, now=None):
                 sets = [dict(r) for r in conn.execute(
                     "SELECT exercise, weight_kg, reps, duration_s FROM sets WHERE user_id=? AND workout_id=? ORDER BY idx",
                     (uid, w["id"]))]
+                sets = [x for x in sets if x["exercise"] != "Unknown"]   # sets the vendor sent without an action name
+                if not sets:
+                    with conn:
+                        conn.execute("UPDATE workouts SET hevy_attempts=?, hevy_error=? WHERE user_id=? AND id=?",
+                                     (MAX_ATTEMPTS, "no sets with an action name; not sent", uid, w["id"]))
+                    continue
                 try:
                     hid = client.create_workout(build_workout(dict(w), sets, template_for, tz))
                 except HevyError as e:

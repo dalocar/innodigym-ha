@@ -225,6 +225,45 @@ class PushTest(Base):
         for part in ("GET /v1/exercise_templates", "HTTP 200", "text/html", "Just a moment"):
             self.assertIn(part, msg)
 
+    def test_create_template_accepts_plain_text_json_and_quoted_ids(self):
+        import http.server, threading
+        replies = [(b"2926a432-975e-4848-94a0-7425cd735b90", "text/html; charset=utf-8"),
+                   (b'{"id": 123}', "application/json"), (b'"abcd1234"', "application/json")]
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                body, ctype = replies.pop(0)
+                self.send_response(200); self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            log_message = lambda *a: None  # noqa: E731
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            c = hevy.HevyClient("k", base="http://127.0.0.1:%d" % srv.server_address[1])
+            got = [c.create_template("X", "weight_reps") for _ in range(3)]
+        finally:
+            srv.shutdown()
+        self.assertEqual(got, ["2926a432-975e-4848-94a0-7425cd735b90", "123", "abcd1234"])
+
+    def test_created_template_is_remembered_so_retries_do_not_create_it_again(self):
+        u = self.user(hevy_api_key="k", hevy_since="2026-11-01")
+        self.workout(u["id"], sets=[{"exercise": "Seated Chest Fly", "weight_kg": 10.0, "reps": 10}])
+        c = FakeHevy(fail=hevy.HevyError("HTTP 400 nope", status=400))
+        hevy.push_user(self.conn, u, c)
+        self.assertEqual(len(c.created_templates), 1)
+        hevy.push_user(self.conn, u, c)       # same workout again: the template is in hevy_exercises now
+        self.assertEqual(len(c.created_templates), 1)
+
+    def test_sets_without_an_action_name_are_not_sent(self):
+        u = self.user(hevy_api_key="k", hevy_since="2026-11-01")
+        self.workout(u["id"], sets=[{"exercise": "Unknown", "weight_kg": 10.0, "reps": 10}])
+        self.workout(u["id"], when="2026-11-16 10:00:00", sets=[
+            {"exercise": "Unknown", "weight_kg": 10.0, "reps": 10}, {"exercise": "Row", "weight_kg": 20.0, "reps": 8}])
+        c = FakeHevy({"row": "R"})
+        self.assertEqual(hevy.push_user(self.conn, u, c)["pushed"], 1)
+        self.assertEqual(len(c.workouts[0]["exercises"]), 1)
+        self.assertEqual(hevy.counts(self.conn, u), {"sent": 1, "waiting": 0})
+
     def test_unexpected_error_in_one_workout_does_not_escape(self):
         u = self.user(hevy_api_key="k", hevy_since="2026-11-01")
         self.workout(u["id"])
@@ -240,6 +279,15 @@ class PushTest(Base):
         self.conn.execute("UPDATE workouts SET hevy_attempts=5")
         accounts.apply_options(self.conn, [{"name": "Alex", "hevy_api_key": "k"}])
         self.assertEqual(self.conn.execute("SELECT hevy_attempts FROM workouts").fetchone()[0], 0)
+
+    def test_alternating_left_right_actions_become_one_block(self):
+        u = self.user(hevy_api_key="k", hevy_since="2026-11-01", hevy_actions="Row (L)=Cable Row; Row (R)=Cable Row")
+        sets = [{"exercise": n, "weight_kg": 15.0, "reps": 12} for n in ("Row (L)", "Row (R)", "Row (L)", "Row (R)")]
+        self.workout(u["id"], sets=sets + [{"exercise": "Press", "weight_kg": 20.0, "reps": 8}])
+        c = FakeHevy({"cable row": "CR", "press": "P"})
+        hevy.push_user(self.conn, u, c)
+        ex = c.workouts[0]["exercises"]
+        self.assertEqual([(e["exercise_template_id"], len(e["sets"])) for e in ex], [("CR", 4), ("P", 1)])
 
     def test_exercise_types(self):
         s = lambda w, r, d=0: {"weight_kg": w, "reps": r, "duration_s": d}  # noqa: E731
